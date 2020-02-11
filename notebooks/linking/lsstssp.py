@@ -262,6 +262,62 @@ def RaDec2IcrfU_rad(ra, dec):
 
     return np.array([x, y, z])
 
+def IcrfHel2RaDecTopo_deg(xyz_hel_ast,xyz_hel_observer):
+    """Transform heliocentric ICRF coordinates to 
+    topocentric Right Ascension (RA) and Declination (DEC)
+    
+    Parameters:
+    --------
+    xyz_hel_ast      ... 3D heliocentric position vectors of asteroid (ICRF) [au]
+    xyz_hel_observer ... 3D heliocentric position vectors of observer (ICRF) [au]
+    
+    Returns:
+    --------
+    ra ... Right Ascension [deg]
+    dec ... Declination [deg]
+
+    """
+    pix2=np.pi*2
+    
+    #observer to asteroid vectors
+    xyz_obs=xyz_ast-xyz_observer
+    
+    r=np.linalg.norm(xyz_obs,axis=1)
+    rn=np.array([np.divide(xyz_obs[:,0],r),np.divide(xyz_obs[:,1],r),np.divide(xyz_obs[:,2],r)]).T
+    
+    RA=np.mod(np.arctan2(rn[:,1],rn[:,0])+pix2,pix2)
+    DEC=np.arcsin(rn[:,2])
+    
+    return np.rad2deg([RA, DEC]).T
+
+def Icrf2RaDec_deg(xyz_topo_ast,):
+    """Transform topocentric ICRF coordinates to
+    Right Ascension (RA) and Declination (DEC)
+    
+    Parameters:
+    --------
+    xyz_topo_ast      ... 3D topocentric position vectors of asteroid (ICRF) [au]
+ 
+    
+    Returns:
+    --------
+    ra ... Right Ascension [deg]
+    dec ... Declination [deg]
+
+    """
+    pix2=np.pi*2
+    
+    #observer to asteroid vectors
+    
+    r=np.linalg.norm(xyz_topo_ast,axis=1)
+    rn=np.array([np.divide(xyz_topo_ast[:,0],r),
+                 np.divide(xyz_topo_ast[:,1],r),
+                 np.divide(xyz_topo_ast[:,2],r)]).T
+    
+    RA=np.mod(np.arctan2(rn[:,1],rn[:,0])+pix2,pix2)
+    DEC=np.arcsin(rn[:,2])
+    
+    return np.rad2deg([RA, DEC]).T
 
 def radec2eclip(ra, dec, **kwargs):
     """Convert Right Ascension and Declination to ecliptic xyz unit vector
@@ -294,7 +350,7 @@ def radec2eclip(ra, dec, **kwargs):
 # OBSERVATIONS, TRACKLETS AND ARROWS
 ###########################################
 
-def SelectTrackletsFromObsData(pairs, df, time_column_name):
+def SelectTrackletsFromObsData(pairs, df, dt_min, dt_max, time_column_name):
     """Select data in trackelts from observations data frame.
 
     Parameters:
@@ -302,6 +358,10 @@ def SelectTrackletsFromObsData(pairs, df, time_column_name):
     pairs             ... array of observation indices that form a tracklet
                           (only 2 entries are supported for now)
     df                ... pandas dataframe containing observation data
+    dt_min            ... minimum timespan between two observations 
+                          to be considered a pair, e.g. exposure duration (days)
+    dt_max            ... maximum timespan between two observations 
+                          to be considered a pair (days)
     time_column_name  ... string, the name of the pandas dataframe column
                           containing the epoch of each observation
 
@@ -313,14 +373,14 @@ def SelectTrackletsFromObsData(pairs, df, time_column_name):
                           tracklets (only 2 observation entries per
                           tracklet are supported for now)
     """
-    goodpairs = CullSameTimePairs(pairs, df, time_column_name)
+    goodpairs = CullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name)
     index_list = np.unique(goodpairs.flatten())
-    df2 = (df.iloc[index_list]).reset_index()
+    #df2 = (df.iloc[index_list]).reset_index()
 
-    return df2, goodpairs
+    return df, goodpairs
 
 
-def CullSameTimePairs(pairs, df, time_column_name):
+def CullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name):
     """Cull all observation pairs that occur at the same time.
 
     Parameters:
@@ -328,6 +388,10 @@ def CullSameTimePairs(pairs, df, time_column_name):
     pairs             ... array of observation indices that form a tracklet
                           (only 2 entries are supported for now)
     df                ... pandas dataframe containing observation data
+    dt_min            ... minimum timespan between two observations 
+                          to be considered a pair, e.g. exposure duration (days)
+    dt_max            ... maximum timespan between two observations 
+                          to be considered a pair (days)
     time_column_name  ... string, the name of the pandas dataframe column
                           containing the epoch of each observation
 
@@ -339,31 +403,40 @@ def CullSameTimePairs(pairs, df, time_column_name):
     """
 
     tn = time_column_name
-    goodpairs = []
-    goodpairs_app = goodpairs.append
-    for p in pairs:
-        if (df[tn][p[0]] < df[tn][p[1]]):
-            goodpairs_app(p)
+    # Tracklets from observation paris cannot be constructed from contemporal observations (delta_t==0)
+    # nor observations that are too far apart (>= dt_max)
+    delta_t = np.abs(df[tn][pairs[:,1]].values-df[tn][pairs[:,0]].values)
+    goodpairs = pairs[(delta_t>dt_min) & (delta_t<dt_max)]
     return np.array(goodpairs)
 
 
-def create_heliocentric_arrows(df, r, drdt, tref, cr, lttc=False):
-    """Create tracklets/arrows from dataframe containing RADEC observations
+def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc=False, filtering=True, verbose=True, eps=0):
+    """Create tracklets/arrows from dataframe containing nightly RADEC observations
        and observer positions.
 
     Parameters:
     -----------
-    df   ... pandas DataFrame containing RA and DEC [deg], time [JD,MJD],
-             (x,y,z)_observer positions [au, ICRF]
-    r    ... assumed radius of heliocentric sphere used for arrow creation[au]
-    drdt ... assumed radial velocity
-    tref ... reference time for arrow generation
-    cr   ... maximum clustering radius for arrow creation (au)
+    df       ... Pandas DataFrame containing nightly RA and DEC [deg], time [JD, MJD],
+                 (x,y,z)_observer positions [au, ICRF]
+    r        ... assumed radius of heliocentric sphere used for arrow creation[au]
+    drdt     ... assumed radial velocity
+    tref     ... reference time for arrow generation
+    cr       ... maximum spacial clustering radius for arrow creation (au)
+    ct_min   ... minimum temporal clusting radius for arrow creation (days)
+    ct_max   ... maximum temporal clusting radius for arrow creation (days)
 
 
     Keyword arguments:
     ------------------
-    lttc (optional) ... light travel time correction
+    v_max (optional)       ... velocity cutoff [au/day]
+    lttc (optional)        ... light travel time correction
+    filtering (optional)   ... filter created tracklets (exclude tracklets built 
+                                from data with the same timestamp) 
+    verbose (optional)     ... print verbose progress statements  
+    eps (optional)         ... Branches of the Kdtree are not explored if their 
+                               nearest points are further than r/(1+eps), 
+                               and branches are added in bulk if their furthest points 
+                               are nearer than r * (1+eps). eps has to be non-negative.
 
     Returns:
     --------
@@ -372,6 +445,10 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, lttc=False):
     t         ... tracklet/arrow reference epoch [JD/MJD]
     goodpairs ... index pairs of observations that go into each tracklet/arrow
     """
+    
+    goodpairs=[]
+    paris=[]
+    
     # speed of light in au/day
     c_aupd = 173.145
 
@@ -394,39 +471,86 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, lttc=False):
     # Heliocentric postions of the observed asteroids
     posu = sphere_line_intercept(los, observer, r_plus_dr)
 
+    if(verbose):
+        print('Heliocentric positions generated.')
+        print('Building spacial KDTree...')
+        
     # To generate tracklets we build our KDTree based on the positions
     # in heliocentric space
-    kdtree = scsp.cKDTree(posu, leafsize=16, compact_nodes=True,
+    kdtree_s = scsp.cKDTree(posu, leafsize=16, compact_nodes=True,
                           copy_data=False, balanced_tree=True, boxsize=None)
     # rule out un-physical combinations of observations with kdtree
 
     # Query KDTree for good pairs of observations that lie within
     # the clustering radius cr
-    pairs = kdtree.query_pairs(cr)
+    if(verbose):
+        print('KDTree generated. Creating tracklets...')
+        
+    pairs = kdtree_s.query_pairs(cr,p=2., eps=eps, output_type='ndarray')
 
-    # Discard impossible pairs (same timestamp)
-    [df2, goodpairs] = SelectTrackletsFromObsData(pairs, df, 'time')
+    if(verbose):
+        print('Tracklet candidates found:',len(pairs))
 
-    x = []
-    x_add = x.append
-    v = []
-    v_add = v.append
-    t = []
-    t_add = t.append
-    for p in goodpairs:
-        x_add(posu[p[0]])
-        t_add(df['time'][p[0]])
-        v_add((posu[p[1]]-posu[p[0]])/(df['time'][p[1]]-df['time'][p[0]]))
-
-# correct arrows for light travel time
+    if (filtering):
+        if(verbose):
+            print('Filtering arrows by time between observations...')
+        
+        # Discard impossible pairs (same timestamp)
+        [df2, goodpairs] = SelectTrackletsFromObsData(pairs, df, ct_min, ct_max, 'time')
+        
+        if(verbose):
+            print('Tracklets filtered. New number of tracklets:',len(goodpairs))
+    
+    else:
+        goodpairs=pairs
+    
+    
+    # tracklet position for filtered pairs
+    x = posu[goodpairs[:,0]]
+    # tracklet time
+    t = df['time'][goodpairs[:,0]].values
+    # tracklet velocity through forward differencing
+    va = []
+    vapp = va.append
+    dt = df['time'][goodpairs[:,1]].values-df['time'][goodpairs[:,0]].values
+    dx = posu[goodpairs[:,1]]-posu[goodpairs[:,0]]
+    for d in range(0,3):
+        vapp(np.divide(dx[:,d],dt))
+    v = np.array(va).T
+    
+    if (filtering):
+        if(verbose):
+            print('Filtering arrows by max velocity..')
+        vnorm=norm(v)
+        v_idx=np.where(vnorm<=v_max)[0]
+    
+        goodpairs=np.take(goodpairs,v_idx,axis=0)
+        x=np.take(x,v_idx,axis=0)
+        v=np.take(v,v_idx,axis=0)
+        t=np.take(t,v_idx)
+    
+#         print('lenx_filtered',len(x))
+#         print('lenv_filtered',len(v))
+#         print('lent_filtered',len(t))
+#         print('x',x)
+#         print('v',v)
+#         print('t',t)
+#         print('goodpairs',goodpairs)
+    
+    if(verbose):
+        print('Tracklets created:',len(goodpairs))
+    
+    # correct arrows for light travel time
     if(lttc):
+        if(verbose):
+            print('(Linear correction for light travel time aberration...')
         xo = observer[goodpairs[:, 0]]
-        dist = norm(np.array(x)-xo)
-        xl = np.array(x).T-dist/c_aupd*np.array(v).T
-        return xl.T, np.array(v), np.array(t), goodpairs
+        dist = norm(x-xo)
+        xl = x.T-dist/c_aupd*v.T
+        return xl.T, v, t, goodpairs
 
     else:
-        return np.array(x), np.array(v), np.array(t), goodpairs
+        return x, v, t, goodpairs
 
 
 def propagate_arrows_linear(x, v, t, tp):
