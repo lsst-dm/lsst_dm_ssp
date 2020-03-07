@@ -40,6 +40,18 @@ Implementation: S. Eggl 20191215
 import numpy as np
 import numba
 
+# Accelerated vector operations
+import vector
+
+# Constants such as the speed of light and GM
+import constants as const
+
+# Coordinate transfroms
+import transforms
+
+# Orbital Dynamics 
+import propagate
+
 # Database
 # import pandas as pd
 
@@ -50,337 +62,38 @@ import spiceypy as sp
 import scipy.spatial as scsp
 # import sklearn.cluster as cluster
 
-__all__ = ['norm', 'unit_vector', 'rotate_vector', 'sphere_line_intercept',
-           'radec2icrfu', 'RaDec2IcrfU_deg', 'RaDec2IcrfU_rad', 'radec2eclip',
-           'SelectTrackletsFromObsData', 'CullSameTimePairs',
-           'create_heliocentric_arrows', 'propagate_arrows_linear',
-           'propagate_arrows_great_circle', 'propagate_arrows_2body'
-           ]
+__all__ = [ 'lsstNight','sphereLineIntercept',
+           'selectTrackletsFromObsData', 'cullSameTimePairs',
+           'makeHeliocentricArrows', 
+           'Heliolinc2','CollapseClusters']
 
 ############################################
-# VECTOR OPERATIONS
-###########################################
-@numba.njit
-def norm(v):
-    """Calculate 2-norm for vectors 1D and 2D arrays.
-
-    Parameters:
-    -----------
-    v ... vector or 2d array of vectors
-
-    Returns:
-    --------
-    u ... norm (length) of vector(s)
-
-    """
-
-    if(v.ndim == 1):
-        n = np.vdot(v, v)
-    elif(v.ndim == 2):
-        lv = len(v[:, 0])
-        n = np.zeros(lv)
-        for i in range(lv):
-            n[i] = np.vdot(v[i, :], v[i, :])
-    else:
-        raise TypeError
-
-    return np.sqrt(n)
-
-
-@numba.njit
-def unit_vector(v):
-    """Normalize vectors (1D and 2D arrays).
-
-    Parameters:
-    -----------
-    v ... vector or 2d array of vectors
-
-    Returns:
-    --------
-    u ... unit lenght vector or 2d array of vectors of unit lenght
-
-    """
-
-    if(v.ndim == 1):
-        u = v/norm(v)
-    elif(v.ndim == 2):
-        lv = len(v[:, 0])
-        dim = len(v[0, :])
-        u = np.zeros((lv, dim))
-        for i in range(lv):
-            n = norm(v[i, :])
-            for j in range(dim):
-                u[i, j] = v[i, j]/n
-    else:
-        raise TypeError
-
-    return u
-
-
-def rotate_vector(angle, axis, vector):
-    """Rotate vector about arbitrary axis by angle[rad].
-
-    Parameters:
-    -----------
-    angle  ... rotation angle [rad]
-    axis   ... rotation axis: array (n,3)
-    vector ... vector to be rotated: array(n,3)
-    """
-    sina = np.sin(angle)
-    cosa = np.cos(angle)
-    u = unit_vector(axis)
-    print('u:', np.shape(u), 'v:', np.shape(vector))
-    uxv = np.cross(u, vector)
-    uuv = u*(np.vdot(u, vector))
-    vrot = uuv.T+cosa*np.cross(uxv, u).T+sina*uxv.T
-    return vrot.T
-
-
-# @numba.njit
-def sphere_line_intercept(l, o, r):
-    """Calculate intercept point between line y = l.x + o
-        and a sphere around the center of origin of the
-        coordinate system: c=0
-
-        Parameters:
-        ------------
-        l ... vector of line of sight
-        o ... observer position
-        r ... vector of distances (radii on the heliocecntric sphere)
-
-        Returns:
-        --------
-        x_intercept  ... position of intersection
-                         between the line and the sphere
-                         along the line of sight
-    """
-
-    x_intercept = np.full(np.shape(l), np.nan)
-
-    ln = unit_vector(l)
-
-    for i in range(len(l[:, 0])):
-
-        lo = np.vdot(ln[i, :], o[i, :])
-
-        if (r.size == 1):
-            r2 = r*r
-        else:
-            r2 = r[i]*r[i]
-
-        discrim = lo**2 - (np.vdot(o[i, :], o[i, :]) - r2)
-        if(discrim >= 0):
-            # line and sphere do actually intersect
-            d = -lo + np.sqrt(discrim)
-            x_intercept[i, :] = o[i, :]+d*ln[i, :]
-
-    return x_intercept
-
-
-############################################
-# COORDINATE TRANSFORMS
+# AUXLIARY FUNCTIONS
 ###########################################
 
-def radec2icrfu(ra, dec, **kwargs):
-    """Convert Right Ascension and Declination to ICRF xyz unit vector
-
+def lsstNight(expMJD, minexpMJD):
+    """Calculate the night for a given observation epoch and a survey start date.
+    
     Parameters:
     -----------
-    ra ... Right Ascension
-    dec ... Declination
-
-    Keyword Arguments:
-    ------------------
-    deg ... Are angles in degrees: True or radians: False
-
-    Returns:
-    --------
-    x,y,z ... 3D vector of unit length (ICRF)
-    """
-    options = {'deg': False}
-
-    options.update(kwargs)
-
-    if (options['deg']):
-        a = np.deg2rad(ra)
-        d = np.deg2rad(dec)
-    else:
-        a = ra
-        d = dec
-
-    cosd = np.cos(d)
-    x = cosd*np.cos(a)
-    y = cosd*np.sin(a)
-    z = np.sin(d)
-
-    return np.array([x, y, z])
-
-
-@numba.njit
-def RaDec2IcrfU_deg(ra, dec):
-    """Convert Right Ascension and Declination to ICRF xyz unit vector
-
-    Parameters:
-    -----------
-    ra ... Right Ascension [deg]
-    dec ... Declination [deg]
-
-    Returns:
-    --------
-    x,y,z ... 3D vector of unit length (ICRF)
-    """
-
-    a = np.deg2rad(ra)
-    d = np.deg2rad(dec)
-
-    cosd = np.cos(d)
-    x = cosd*np.cos(a)
-    y = cosd*np.sin(a)
-    z = np.sin(d)
-
-    return np.array([x, y, z])
-
-
-@numba.njit
-def RaDec2IcrfU_rad(ra, dec):
-    """Convert Right Ascension and Declination to ICRF xyz unit vector
-
-    Parameters:
-    -----------
-    ra ... Right Ascension [rad]
-    dec ... Declination [rad]
-
-    Returns:
-    --------
-    x,y,z ... 3D vector of unit length (ICRF)
-    """
-
-    cosd = np.cos(dec)
-    x = cosd*np.cos(ra)
-    y = cosd*np.sin(ra)
-    z = np.sin(dec)
-
-    return np.array([x, y, z])
-
-def IcrfHel2RaDecTopo_deg(xyz_hel_ast,xyz_hel_observer):
-    """Transform heliocentric ICRF coordinates to 
-    topocentric Right Ascension (RA) and Declination (DEC)
-    
-    Parameters:
-    --------
-    xyz_hel_ast      ... 3D heliocentric position vectors of asteroid (ICRF) [au]
-    xyz_hel_observer ... 3D heliocentric position vectors of observer (ICRF) [au]
+    expMJD ... epoch of observation / exposure [modified Julian date, MJD]
+    minexpMJD ... start date of survey [modified Julian date, MJD]
     
     Returns:
     --------
-    ra ... Right Ascension [deg]
-    dec ... Declination [deg]
-
+    night ... the night of a given observation epoch with respect to the survey start date.
+    
     """
-    pix2=np.pi*2
-    
-    #observer to asteroid vectors
-    xyz_obs=xyz_ast-xyz_observer
-    
-    r=np.linalg.norm(xyz_obs,axis=1)
-    rn=np.array([np.divide(xyz_obs[:,0],r),np.divide(xyz_obs[:,1],r),np.divide(xyz_obs[:,2],r)]).T
-    
-    RA=np.mod(np.arctan2(rn[:,1],rn[:,0])+pix2,pix2)
-    DEC=np.arcsin(rn[:,2])
-    
-    return np.rad2deg([RA, DEC]).T
-
-def Icrf2RaDec_deg(xyz_topo_ast,):
-    """Transform topocentric ICRF coordinates to
-    Right Ascension (RA) and Declination (DEC)
-    
-    Parameters:
-    --------
-    xyz_topo_ast      ... 3D topocentric position vectors of asteroid (ICRF) [au]
- 
-    
-    Returns:
-    --------
-    ra ... Right Ascension [deg]
-    dec ... Declination [deg]
-
-    """
-    pix2=np.pi*2
-    
-    #observer to asteroid vectors
-    
-    r=np.linalg.norm(xyz_topo_ast,axis=1)
-    rn=np.array([np.divide(xyz_topo_ast[:,0],r),
-                 np.divide(xyz_topo_ast[:,1],r),
-                 np.divide(xyz_topo_ast[:,2],r)]).T
-    
-    RA=np.mod(np.arctan2(rn[:,1],rn[:,0])+pix2,pix2)
-    DEC=np.arcsin(rn[:,2])
-    
-    return np.rad2deg([RA, DEC]).T
-
-def radec2eclip(ra, dec, **kwargs):
-    """Convert Right Ascension and Declination to ecliptic xyz unit vector
-
-    Parameters:
-    -----------
-    ra ... Right Ascension
-    dec ... Declination
-
-    Keyword Arguments:
-    ------------------
-    deg ... Are angles in degrees: True or radians: False
-
-    Returns:
-    --------
-    x_ecl ... 3D vectors of unit length (ecliptic)
-    """
-
-    x_icrf = radec2icrfu(ra, dec, **kwargs)
-
-    icrf2ecl = np.array([[1., 0., 0.],
-                        [0., 0.91748206, 0.39777716],
-                        [0., -0.39777716, 0.91748206]])
-
-    x_ecl = icrf2ecl.dot(x_icrf)
-    return x_ecl
-
+    local_midnight = 0.16
+    const = minexpMJD + local_midnight - 0.5
+    night = np.floor(expMJD - const)
+    return night
 
 ############################################
 # OBSERVATIONS, TRACKLETS AND ARROWS
 ###########################################
 
-def SelectTrackletsFromObsData(pairs, df, dt_min, dt_max, time_column_name):
-    """Select data in trackelts from observations data frame.
-
-    Parameters:
-    -----------
-    pairs             ... array of observation indices that form a tracklet
-                          (only 2 entries are supported for now)
-    df                ... pandas dataframe containing observation data
-    dt_min            ... minimum timespan between two observations 
-                          to be considered a pair, e.g. exposure duration (days)
-    dt_max            ... maximum timespan between two observations 
-                          to be considered a pair (days)
-    time_column_name  ... string, the name of the pandas dataframe column
-                          containing the epoch of each observation
-
-    Returns:
-    --------
-    df2               ... pandas dataframe containing only observations
-                          that occur in tracklets.
-    goodpairs         ... array of observation indices that form possible
-                          tracklets (only 2 observation entries per
-                          tracklet are supported for now)
-    """
-    goodpairs = CullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name)
-    index_list = np.unique(goodpairs.flatten())
-    #df2 = (df.iloc[index_list]).reset_index()
-
-    return df, goodpairs
-
-
-def CullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name):
+def cullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name):
     """Cull all observation pairs that occur at the same time.
 
     Parameters:
@@ -408,11 +121,40 @@ def CullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name):
     delta_t = np.abs(df[tn][pairs[:,1]].values-df[tn][pairs[:,0]].values)
     goodpairs = pairs[(delta_t>dt_min) & (delta_t<dt_max)]
     return np.array(goodpairs)
+    
+    
+def selectTrackletsFromObsData(pairs, df, dt_min, dt_max, time_column_name):
+    """Select data in trackelts from observations data frame.
 
+    Parameters:
+    -----------
+    pairs             ... array of observation indices that form a tracklet
+                          (only 2 entries are supported for now)
+    df                ... pandas dataframe containing observation data
+    dt_min            ... minimum timespan between two observations 
+                          to be considered a pair, e.g. exposure duration (days)
+    dt_max            ... maximum timespan between two observations 
+                          to be considered a pair (days)
+    time_column_name  ... string, the name of the pandas dataframe column
+                          containing the epoch of each observation
 
-def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc=False, filtering=True, verbose=True, eps=0):
+    Returns:
+    --------
+    df2               ... pandas dataframe containing only observations
+                          that occur in tracklets.
+    goodpairs         ... array of observation indices that form possible
+                          tracklets (only 2 observation entries per
+                          tracklet are supported for now)
+    """
+    goodpairs = cullSameTimePairs(pairs, df, dt_min, dt_max, time_column_name)
+    index_list = np.unique(goodpairs.flatten())
+    #df2 = (df.iloc[index_list]).reset_index()
+
+    return df, goodpairs
+
+def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc=False, filtering=True, verbose=True, eps=0):
     """Create tracklets/arrows from dataframe containing nightly RADEC observations
-       and observer positions.
+    and observer positions.
 
     Parameters:
     -----------
@@ -420,7 +162,8 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
                  (x,y,z)_observer positions [au, ICRF]
     r        ... assumed radius of heliocentric sphere used for arrow creation[au]
     drdt     ... assumed radial velocity
-    tref     ... reference time for arrow generation
+    tref     ... reference time for arrow generation. Used to calculate how much the 
+                 heliocentric distance changes between observations based on assumed dr/dt
     cr       ... maximum spacial clustering radius for arrow creation (au)
     ct_min   ... minimum temporal clusting radius for arrow creation (days)
     ct_max   ... maximum temporal clusting radius for arrow creation (days)
@@ -431,7 +174,7 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
     v_max (optional)       ... velocity cutoff [au/day]
     lttc (optional)        ... light travel time correction
     filtering (optional)   ... filter created tracklets (exclude tracklets built 
-                                from data with the same timestamp) 
+                               from data with the same timestamp) 
     verbose (optional)     ... print verbose progress statements  
     eps (optional)         ... Branches of the Kdtree are not explored if their 
                                nearest points are further than r/(1+eps), 
@@ -448,9 +191,6 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
     
     goodpairs=[]
     paris=[]
-    
-    # speed of light in au/day
-    c_aupd = 173.145
 
     # Transform RADEC observations into positions on the unit sphere (US)
     xyz = radec2icrfu(df['RA'], df['DEC'], deg=True)
@@ -469,7 +209,7 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
     r_plus_dr = r+dr
 
     # Heliocentric postions of the observed asteroids
-    posu = sphere_line_intercept(los, observer, r_plus_dr)
+    posu = sphereLineIntercept(los, observer, r_plus_dr)
 
     if(verbose):
         print('Heliocentric positions generated.')
@@ -504,7 +244,6 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
     else:
         goodpairs=pairs
     
-    
     # tracklet position for filtered pairs
     x = posu[goodpairs[:,0]]
     # tracklet time
@@ -520,21 +259,21 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
     
     if (filtering):
         if(verbose):
-            print('Filtering arrows by max velocity..')
+            print('Filtering arrows by max velocity...')
         vnorm=norm(v)
         v_idx=np.where(vnorm<=v_max)[0]
     
         goodpairs=np.take(goodpairs,v_idx,axis=0)
         x=np.take(x,v_idx,axis=0)
         v=np.take(v,v_idx,axis=0)
-        t=np.take(t,v_idx)
+        t=np.take(t,v_idx,axis=0)
     
 #         print('lenx_filtered',len(x))
 #         print('lenv_filtered',len(v))
 #         print('lent_filtered',len(t))
 #         print('x',x)
 #         print('v',v)
-#         print('t',t)
+ #        print('t',t)
 #         print('goodpairs',goodpairs)
     
     if(verbose):
@@ -546,106 +285,229 @@ def create_heliocentric_arrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., 
             print('(Linear correction for light travel time aberration...')
         xo = observer[goodpairs[:, 0]]
         dist = norm(x-xo)
-        xl = x.T-dist/c_aupd*v.T
+        xl = x.T-dist/const.CAUPD*v.T
         return xl.T, v, t, goodpairs
 
     else:
         return x, v, t, goodpairs
 
-
-def propagate_arrows_linear(x, v, t, tp):
-    """Linear propagattion of arrows to the same time.
-
-    Parameters:
-    -----------
-    x  ... array of 3D positions
-    v  ... array of 3D velocities
-    t  ... array of epochs for states (x,v)
-    tp ... epoch to propagate state to
-
-    Returns:
-    --------
-    xp ... array of propagated 3D positions
-    dt ... array of time deltas wrt the propatation epoch: tp-t
-    """
-    dt = tp-t
-    xp = x + (v*np.array([dt, dt, dt]).T)
-    return xp, dt
-
-
-def propagate_arrows_great_circle(x, v, t, tp):
-    """Propagate arrows to the same time along a Great Circle.
+def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan', lttc=False, verbose=True):
+    """HelioLinC2 (Heliocentric Linking in Cartesian Coordinates) algorithm.
 
     Parameters:
     -----------
-    x  ... array of 3D positions
-    v  ... array of 3D velocities
-    t  ... array of epochs for states (x,v)
-    tp ... epoch to propagate state to
+    dfobs ... Pandas DataFrame containing object ID (objId), observation ID (obsId),
+               time, night, RA [deg], DEC[deg], observer x,y,z [au]
+
+
+    r      ... assumed heliocentric distance [au]
+    drdt   ... dr/dt assumed heliocentric radial velocity [au/day]
+    cr     ... clustering radius [au]
+    ct_min ... minimum timespan between observations to allow for trackelt making [days]
+    ct_max ... maximum timespan between observations to allow for tracklet making [days]
+    clustering_algorithm ... clustering_algorithm (currently either 'dbscan' or 'kdtree')
+    lttc   ... Light travel time correction
+    verbose... Print progress statements
 
     Returns:
     --------
-    xp ... array of propagated 3D positions
-    vp ... array of propagated 3D velocities
-    dt ... array of time deltas wrt the propatation epoch: tp-t
+    obs_in_cluster_df ... Pandas DataFrame containing linked observation clusters (no prereduction)
     """
-    dt = tp-t
 
-    # define rotation axis as r x v (orbital angular momemtum)
-    h = np.cross(x, v)
-    # define rotation angle via w = v/r where w is dphi/dt
-    # so that phi = w*dt = v/r*dt
-    phi = norm(v)/norm(x)*dt
+#     xpall=[]
+#     vpall=[]
+    xar=[]
+    var=[]
+    tar=[]
+    obsids_night=[]
 
-    xp = rotate_vector(phi, h, x)
-    vp = rotate_vector(phi, h, v)
-    return xp, vp, dt
+    # the following two arrays are for testing purposes only
+    objid_night=[]
+    tobs_night=[]
+
+    for n in df_grouped_by_night.groups.keys():
+        if (verbose):
+            print('Processing night ',n)
+        # SELECT NIGHT FROM OBSERVATIONS DATA BASE
+        idx=df_grouped_by_night.groups[n].values
+        df=dfobs.loc[idx,:].reset_index(drop=True)
+        #tref=(df['time'].max()+df['time'].min())*0.5
+        tref=(dfobs['time'].max()+dfobs['time'].min())*0.5
+
+        # GENERATE ARROWS / TRACKLETS FOR THIS NIGHT
+        [xarrow_night, 
+         varrow_night, 
+         tarrow_night, 
+         goodpairs_night]=MakeHeliocentricArrows(df,r,drdt,tref,cr,ct_min,
+                                                     ct_max,v_max=1,lttc=False,
+                                                     filtering=True,verbose=True,eps=cr)
+        # ADD TO PREVIOUS ARROWS
+        if (len(xarrow_night)<1):
+            if (verbose):
+                print('no data in night ',n)
+        else:
+            xar.append(xarrow_night)
+            var.append(varrow_night)
+            tar.append(tarrow_night)
+            obsids_night.append(df['obsId'].values[goodpairs_night])
+            objid_night.append(df['objId'].values[goodpairs_night])
+            tobs_night.append(df['time'].values[goodpairs_night])
 
 
-def propagate_arrows_2body(x, v, t, tp):
-    """ Propagate arrows to the same time using spicepy's 2body propagation.
+    if (len(xar)<1):
+        if (verbose):
+            print('No arrows for the current r, dr/dt pair. ',n)
+    else:    
+        xarrow=np.vstack(xar)
+        varrow=np.vstack(var)
+        tarrow=np.hstack(tar)
+        obsids=np.vstack(obsids_night)
+
+    # the following two arrays are for testing purposes only
+        objids=np.vstack(objid_night)
+        tobs=np.vstack(tobs_night)
+
+    # PROPAGATE ARROWS TO COMMON EPOCH
+        if (verbose):
+            print('Propagating arrows...')
+        tprop=(dfobs['time'].max()+dfobs['time'].min())*0.5
+    #tprop=dfobs['time'].max()+180
+        #[xp,vp,dt] = PropagateArrows2body(xarrow,varrow,tarrow,tprop)
+        [xp, vp, dt] = propagateState(xarrow, varrow, tarrow, tprop, propagator='2body')
+    #[xp,vp,dt] = ls.propagate_arrows_2body(xarrow,varrow,tarrow,dfobs['time'].max()+360)
+
+        rnorm=(r/ls.norm(vp))
+        vpn=vp*np.array([rnorm,rnorm,rnorm]).T
+        xpvp=np.hstack([xp,vpn])
+
+#       # CLUSTER WITH DBSCAN
+        if (verbose):
+            print('Clustering arrows...')
+            
+#       # CLUSTER PROPAGATED STATES (HERE IN REAL SPACE, BUT COULD BE PHASE SPACE)               
+        if(clustering_algorithm=='dbscan'):
+            db=cluster.DBSCAN(eps=eps,min_samples=min_samples,n_jobs=4).fit(xp)
+
+#       # CONVERT CLUSTER INDICES TO OBSERVATION INDICES IN EACH CLUSTER
+            try:
+                obs_in_cluster, labels = observationsInCluster(dfobs,obsids,db,garbage=False)
+                obs_in_cluster_df=pd.DataFrame(zip(labels,obs_in_cluster),columns=['clusterId','obsId'])
+            except: 
+                print('Error in constructing cluster dataframe.')
+
+        elif (clustering_algorithm=='kdtree'):
+        # CLUSTER WITH KDTree
+            if (verbose):
+                print('Clustering arrows...')
+            tree = scsp.KDTree(xp)
+            db = tree.query(xp, k=8, p=2, distance_upper_bound=eps)
+
+            if (verbose):
+                print('Deduplicating observations in clusters...')
+            obs = []
+            obs_app = obs.append
+            arrow_idx = np.array(db,dtype="int64")[1]
+            nan_idx = arrow_idx.shape[0]
+            for i in arrow_idx:
+                entries = i[i<nan_idx]
+                if(len(entries)) > 1:
+                     obs_app([np.unique(np.ravel(obsids[entries]))])
+
+            obs_in_cluster_df = pd.DataFrame(obs,columns=['obsId'])
+            obs_in_cluster_df['clusterId']=obs_in_cluster_df.index.values
+            obs_in_cluster_df=obs_in_cluster_df[['clusterId','obsId']]
+
+        else:
+            raise ('Error in heliolinc2: no valid clustering algorithm selected') 
+
+        # COMMON CODE
+        obs_in_cluster_df['r'] = r
+        obs_in_cluster_df['drdt'] = drdt
+        obs_in_cluster_df['cluster_epoch'] = tprop
+        #xpall.append(xp)
+        #vpall.append(vp)
+        return obs_in_cluster_df
+    
+
+def deduplicateClusters:    
+     """Deduplicate clusters produced by helioLinC2 
+     based on similar observations (r,rdot are discarded)
 
     Parameters:
     -----------
-    x  ... array of 3D positions
-    v  ... array of 3D velocities
-    t  ... array of epochs for states (x,v)
-    tp ... epoch to propagate state to
-
+    cdf ... Pandas DataFrame containing object ID (objId), observation ID (obsId)
+              
     Returns:
     --------
-    xp ... array of propagated 3D positions
-    vp ... array of propagated 3D velocities
-    dt ... array of time deltas wrt the propatation epoch: tp-t
+    cdf2     ... deduplicated Pandas DataFrame 
     """
-    dt = np.array(tp-t)
+ 
+    dup_idx = np.where(cdf.astype(str).duplicated(subset='obsId',keep='first'))[0]
+    cdf2 = cdf.iloc[dup_idx]
+     
+    return cdf2
+        
+        
+    
+def collapseClusterSubsets(cdf):
+    """Merge clusters that are subsets of each other 
+    as produced by HelioLinC2.
 
-    # Gaussian Gravitational Constant [au^1.5/Msun^0.5/D]
-    gaussk = 0.01720209894846
-    # default gravitational parameter [Gaussian units]
-    gm = gaussk*gaussk
+    Parameters:
+    -----------
+    cdf ... Pandas DataFrame containing object ID (objId), observation ID (obsId)
+              
+    Returns:
+    --------
+    cdf2                ... collapsed Pandas DataFrame 
+    subset_clusters     ... indices of input dataframe (cdf) that are subsets
+    subset_cluster_ids  ... linked list of cluster ids [i,j] where j is a subset of i
+    """
+    
+   
+    #for index, row in clusters_df.iterrows():
+    vals=cdf.obsId.values
+    subset_clusters=[]
+    subset_clusters_app=subset_clusters.append
+    subset_cluster_ids=[]
+    subset_cluster_ids_app=subset_cluster_ids.append
 
-    if(x.ndim == 1):
-        state = sp.prop2b(gm, np.hstack((x, v)), dt)
-        xp = state[0:3]
-        vp = state[3:6]
+    cdf_idx=range(0,len(cdf))
 
-    elif(x.ndim == 2):
-        lenx = len(x[:, 0])
-        dimx = len(x[0, :])
-        dimv = len(v[0, :])
-        try:
-            assert(dimx == dimv)
-        except(TypeError):
-            raise TypeError
+    vals_set=[]
+    vals_set_app=vals_set.append
+    vals_min=[]
+    vals_min_app=vals_min.append
+    vals_max=[]
+    vals_max_app=vals_max.append
 
-        xp = []
-        xp_add = xp.append
-        vp = []
-        vp_add = vp.append
-        for i in range(lenx):
-            state = sp.prop2b(gm, np.hstack((x[i, :], v[i, :])), dt[i])
-            xp_add(state[0:3])
-            vp_add(state[3:6])
+    for i in cdf_idx:
+        vals_set_app(set(vals[i]))          
+        vals_min_app(np.min(vals[i]))
+        vals_max_app(np.max(vals[i]))         
 
-    return np.array(xp), np.array(vp), dt
+    vmin=np.array(vals_min)
+    vmax=np.array(vals_max)
+
+    for i in cdf_idx:
+        for j in cdf_idx:
+            if(i != j):
+                    #use the fact that we have ordered sets here
+                    if(vmax[i]<vmin[j]):
+                        break
+                    elif(vmin[i]>vmax[j]):
+                        break
+                    else:
+                        is_subset=vals_set[i].issubset(vals_set[j])
+                        #print(i,j,is_subset)
+                        if(is_subset):
+                            subset_clusters_app(i)
+                            subset_cluster_ids_app([i,j])
+                            break
+        if(np.mod(i, 1000) == 0):                
+            print('Progress [%], ', i/cdf_idx[-1]*100)
+
+    idx_to_drop = subset_clusters
+    
+    cdf2=cdf.drop(index=idx_to_drop)
+    return cdf2, subset_clusters, subset_cluster_ids 
