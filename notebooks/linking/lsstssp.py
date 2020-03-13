@@ -36,36 +36,44 @@ called an "arrow". Arrows are propagated to a common epoch using spiceypy's
 Implementation: S. Eggl 20191215
 """
 
+# Temporary modules:
+from thor.orbits import iod
+
 # Accelerators
 import numpy as np
 import numba
 
 # Accelerated vector operations
-import vector
+import vector as vc
 
 # Constants such as the speed of light and GM
-import constants as const
+import constants as cn
 
 # Coordinate transfroms
-import transforms
+import transforms as tr
 
 # Orbital Dynamics 
-import propagate
+import propagate as pr
 
 # Database
-# import pandas as pd
+import pandas as pd
 
 # Orbital Dynamics
 import spiceypy as sp
 
+# Ephemeris generator
+import ephemeris as ephem
+
 # Clustering
-import scipy.spatial as scsp
-# import sklearn.cluster as cluster
+import scipy.spatial as sc
+import sklearn.cluster as cluster
 
 __all__ = [ 'lsstNight','sphereLineIntercept',
            'selectTrackletsFromObsData', 'cullSameTimePairs',
-           'makeHeliocentricArrows', 
-           'Heliolinc2','CollapseClusters']
+           'makeHeliocentricArrows', 'observationsInCluster',
+           'heliolinc2','collapseClusterSubsets', 'deduplicateClusters',
+           'select3obs','iodFilter']
+
 
 ############################################
 # AUXLIARY FUNCTIONS
@@ -152,7 +160,9 @@ def selectTrackletsFromObsData(pairs, df, dt_min, dt_max, time_column_name):
 
     return df, goodpairs
 
-def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc=False, filtering=True, verbose=True, eps=0):
+def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., eps=0,
+                           lttc=False, filtering=True, verbose=False, 
+                           leafsize=16, balanced_tree=False, n_jobs=1):
     """Create tracklets/arrows from dataframe containing nightly RADEC observations
     and observer positions.
 
@@ -180,6 +190,11 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
                                nearest points are further than r/(1+eps), 
                                and branches are added in bulk if their furthest points 
                                are nearer than r * (1+eps). eps has to be non-negative.
+    leafsize               ... cKDTree leafsize 
+    balanced_tree          ... cKDTree: if True median is used 
+                               instead of mean to calculate box centers, more robust but 
+                               leads to longer tree build times
+    n_jobs                 ... number of available processors for simultaneous cKDTree query
 
     Returns:
     --------
@@ -193,7 +208,7 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
     paris=[]
 
     # Transform RADEC observations into positions on the unit sphere (US)
-    xyz = radec2icrfu(df['RA'], df['DEC'], deg=True)
+    xyz = tr.radec2icrfu(df['RA'], df['DEC'], deg=True)
 
     # Those are the line of sight (LOS) vectors
     los = np.array([xyz[0], xyz[1], xyz[2]]).T
@@ -209,7 +224,7 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
     r_plus_dr = r+dr
 
     # Heliocentric postions of the observed asteroids
-    posu = sphereLineIntercept(los, observer, r_plus_dr)
+    posu = vc.sphereLineIntercept(los, observer, r_plus_dr)
 
     if(verbose):
         print('Heliocentric positions generated.')
@@ -217,8 +232,9 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
         
     # To generate tracklets we build our KDTree based on the positions
     # in heliocentric space
-    kdtree_s = scsp.cKDTree(posu, leafsize=16, compact_nodes=True,
-                          copy_data=False, balanced_tree=True, boxsize=None)
+    kdtree_s = sc.cKDTree(posu, leafsize=leafsize, compact_nodes=True,
+                          copy_data=False, balanced_tree=balanced_tree, 
+                          boxsize=None)
     # rule out un-physical combinations of observations with kdtree
 
     # Query KDTree for good pairs of observations that lie within
@@ -226,7 +242,8 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
     if(verbose):
         print('KDTree generated. Creating tracklets...')
         
-    pairs = kdtree_s.query_pairs(cr,p=2., eps=eps, output_type='ndarray')
+    pairs = kdtree_s.query_pairs(cr, p=2., eps=eps, 
+                                 output_type='ndarray')
 
     if(verbose):
         print('Tracklet candidates found:',len(pairs))
@@ -236,7 +253,7 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
             print('Filtering arrows by time between observations...')
         
         # Discard impossible pairs (same timestamp)
-        [df2, goodpairs] = SelectTrackletsFromObsData(pairs, df, ct_min, ct_max, 'time')
+        [df2, goodpairs] = selectTrackletsFromObsData(pairs, df, ct_min, ct_max, 'time')
         
         if(verbose):
             print('Tracklets filtered. New number of tracklets:',len(goodpairs))
@@ -260,7 +277,7 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
     if (filtering):
         if(verbose):
             print('Filtering arrows by max velocity...')
-        vnorm=norm(v)
+        vnorm=vc.norm(v)
         v_idx=np.where(vnorm<=v_max)[0]
     
         goodpairs=np.take(goodpairs,v_idx,axis=0)
@@ -284,14 +301,89 @@ def makeHeliocentricArrows(df, r, drdt, tref, cr, ct_min, ct_max, v_max=1., lttc
         if(verbose):
             print('(Linear correction for light travel time aberration...')
         xo = observer[goodpairs[:, 0]]
-        dist = norm(x-xo)
-        xl = x.T-dist/const.CAUPD*v.T
+        dist = vc.norm(x-xo)
+        xl = x.T-dist/cn.CAUPD*v.T
         return xl.T, v, t, goodpairs
 
     else:
         return x, v, t, goodpairs
 
-def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan', lttc=False, verbose=True):
+def observationsInCluster(df, pairs, cluster, garbage=False):
+    """List observations in each cluster.
+    
+    Parameters:
+    -----------
+    df      ... pandas dataframe with observations
+    pairs   ... list of pairs of observations [obsid1,obsid2] linked into arrows
+    cluster ... output of clustering algorithm (sklearn.cluster)
+    
+    Returns:
+    --------
+    obs_in_cluster ... list of observations in each cluster
+    """
+    #cluster names (beware: -1 is the cluster of all the leftovers)
+    if(garbage):
+        unique_labels = np.unique(cluster.labels_)
+    else:
+        unique_labels = np.unique(cluster.labels_)[1:]
+    #number of clusters
+    n_clusters = len(unique_labels)
+    
+    #which objects do observations in pairs (tracklets) belong to
+    p = np.array(pairs)              
+    
+    obs_in_cluster=[]
+    obs_in_cluster_add=obs_in_cluster.append
+    
+    #cluster contains 
+    for u in unique_labels:
+        #which indices in pair array appear in a given cluster?
+        idx = np.where(cluster.labels_ == u)[0]
+        
+        #which observations are in this cluster
+        obs_in_cluster_add(np.unique(p[idx].flatten()))
+    
+    return obs_in_cluster, unique_labels  
+
+def medianArrowStateInCluster(xpvp, cluster, garbage=False):
+    """List observations in each cluster.
+    
+    Parameters:
+    -----------
+    xpvp      ... array containing states for each cluster
+    cluster   ... output of clustering algorithm (sklearn.cluster)
+    
+    Returns:
+    --------
+    obs_in_cluster ... list of observations in each cluster
+    """
+    #cluster names (beware: -1 is the cluster of all the leftovers)
+    if(garbage):
+        unique_labels = np.unique(cluster.labels_)
+    else:
+        unique_labels = np.unique(cluster.labels_)[1:]
+    #number of clusters
+    n_clusters = len(unique_labels)
+               
+    
+    median_state=[]
+    median_state_add=median_state.append
+    
+    #cluster contains 
+    for u in unique_labels:
+        #which indices in pair array appear in a given cluster?
+        idx = np.where(cluster.labels_ == u)[0]
+        
+        #which observations are in this cluster
+        
+        median_state_add(np.median(xpvp[idx,:]))
+    
+    return median_state, unique_labels  
+
+    
+def heliolinc2(dfobs, r, drdt, cr, ct_min, ct_max, 
+               clustering_algorithm='dbscan', lttc=False, verbose=True, 
+               min_samples=6, n_jobs=1):
     """HelioLinC2 (Heliocentric Linking in Cartesian Coordinates) algorithm.
 
     Parameters:
@@ -305,10 +397,15 @@ def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan'
     cr     ... clustering radius [au]
     ct_min ... minimum timespan between observations to allow for trackelt making [days]
     ct_max ... maximum timespan between observations to allow for tracklet making [days]
+    
+    Keyword Arguments:
+    ------------------
     clustering_algorithm ... clustering_algorithm (currently either 'dbscan' or 'kdtree')
-    lttc   ... Light travel time correction
-    verbose... Print progress statements
-
+    lttc                 ... Light travel time correction
+    verbose              ... Print progress statements
+    min_samples          ... minimum number of samples for clustering with dbscan
+    n_jobs               ... number of processors used for 2body propagation, dbscan and KDTree query
+    
     Returns:
     --------
     obs_in_cluster_df ... Pandas DataFrame containing linked observation clusters (no prereduction)
@@ -325,6 +422,8 @@ def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan'
     objid_night=[]
     tobs_night=[]
 
+    df_grouped_by_night=dfobs.groupby('night')
+    
     for n in df_grouped_by_night.groups.keys():
         if (verbose):
             print('Processing night ',n)
@@ -338,9 +437,10 @@ def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan'
         [xarrow_night, 
          varrow_night, 
          tarrow_night, 
-         goodpairs_night]=MakeHeliocentricArrows(df,r,drdt,tref,cr,ct_min,
-                                                     ct_max,v_max=1,lttc=False,
-                                                     filtering=True,verbose=True,eps=cr)
+         goodpairs_night]=makeHeliocentricArrows(df,r,drdt,tref,cr,ct_min,
+                                                     ct_max,v_max=1,lttc=False, eps=cr,
+                                                     filtering=True, verbose=True, 
+                                                     leafsize=16, balanced_tree=False, n_jobs=n_jobs)
         # ADD TO PREVIOUS ARROWS
         if (len(xarrow_night)<1):
             if (verbose):
@@ -373,34 +473,36 @@ def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan'
         tprop=(dfobs['time'].max()+dfobs['time'].min())*0.5
     #tprop=dfobs['time'].max()+180
         #[xp,vp,dt] = PropagateArrows2body(xarrow,varrow,tarrow,tprop)
-        [xp, vp, dt] = propagateState(xarrow, varrow, tarrow, tprop, propagator='2body')
+        [xp, vp, dt] = pr.propagateState(xarrow, varrow, tarrow, tprop,
+                                         propagator='2body', n_jobs=n_jobs)
     #[xp,vp,dt] = ls.propagate_arrows_2body(xarrow,varrow,tarrow,dfobs['time'].max()+360)
 
-        rnorm=(r/ls.norm(vp))
+        rnorm=(r/vc.norm(vp))
         vpn=vp*np.array([rnorm,rnorm,rnorm]).T
-        xpvp=np.hstack([xp,vpn])
-
+        xpvpn=np.hstack([xp,vpn])
+        xpvp=np.hstack([xp,vp])
 #       # CLUSTER WITH DBSCAN
         if (verbose):
             print('Clustering arrows...')
             
-#       # CLUSTER PROPAGATED STATES (HERE IN REAL SPACE, BUT COULD BE PHASE SPACE)               
+#       # CLUSTER PROPAGATED STATES (COORDINATE SPACE (xp) OR PHASE SPACE (xpvp)               
         if(clustering_algorithm=='dbscan'):
-            db=cluster.DBSCAN(eps=eps,min_samples=min_samples,n_jobs=4).fit(xp)
+            db=cluster.DBSCAN(eps=cr, min_samples=min_samples, n_jobs=n_jobs).fit(xpvpn)
 
 #       # CONVERT CLUSTER INDICES TO OBSERVATION INDICES IN EACH CLUSTER
             try:
-                obs_in_cluster, labels = observationsInCluster(dfobs,obsids,db,garbage=False)
+                obs_in_cluster, labels = observationsInCluster(dfobs, obsids, db, garbage=False)
                 obs_in_cluster_df=pd.DataFrame(zip(labels,obs_in_cluster),columns=['clusterId','obsId'])
+                # median_state_in_cluster = 
             except: 
-                print('Error in constructing cluster dataframe.')
+                raise Exception('Error in heliolinc2: Could not construct cluster dataframe.')
 
         elif (clustering_algorithm=='kdtree'):
         # CLUSTER WITH KDTree
             if (verbose):
                 print('Clustering arrows...')
-            tree = scsp.KDTree(xp)
-            db = tree.query(xp, k=8, p=2, distance_upper_bound=eps)
+            tree = scsp.cKDTree(xp)
+            db = tree.query(xp, k=16, p=2, distance_upper_bound=cr, n_jobs=n_jobs)
 
             if (verbose):
                 print('Deduplicating observations in clusters...')
@@ -426,12 +528,13 @@ def helioLinc2(dfobs, r, drdt, cr, ct_min, ct_max, clustering_algorithm='dbscan'
         obs_in_cluster_df['cluster_epoch'] = tprop
         #xpall.append(xp)
         #vpall.append(vp)
+        
         return obs_in_cluster_df
     
 
-def deduplicateClusters:    
-     """Deduplicate clusters produced by helioLinC2 
-     based on similar observations (r,rdot are discarded)
+def deduplicateClusters(cdf):    
+    """Deduplicate clusters produced by helioLinC2 
+    based on similar observations (r,rdot are discarded)
 
     Parameters:
     -----------
@@ -442,13 +545,13 @@ def deduplicateClusters:
     cdf2     ... deduplicated Pandas DataFrame 
     """
  
-    dup_idx = np.where(cdf.astype(str).duplicated(subset='obsId',keep='first'))[0]
-    cdf2 = cdf.iloc[dup_idx]
+    #dup_idx = np.where(cdf.astype(str).duplicated(subset='obsId',keep='first'))[0]
+    #cdf2 = cdf.iloc[dup_idx]
      
+    cdf2=(cdf.iloc[cdf.astype(str).drop_duplicates(
+                   subset='obsId',keep="first").index]).reset_index(drop=True)        
     return cdf2
         
-        
-    
 def collapseClusterSubsets(cdf):
     """Merge clusters that are subsets of each other 
     as produced by HelioLinC2.
@@ -511,3 +614,124 @@ def collapseClusterSubsets(cdf):
     
     cdf2=cdf.drop(index=idx_to_drop)
     return cdf2, subset_clusters, subset_cluster_ids 
+
+
+def df2difi(df,index_name,value_name):
+    """Map pandas dataframe with lists of values to THOR difi format"""
+
+    difi=df[value_name].apply(pd.Series) \
+    .merge(df, right_index = True, left_index = True) \
+    .drop([value_name], axis = 1) \
+    .melt(id_vars = [index_name], value_name = value_name) \
+    .drop("variable", axis = 1) \
+    .dropna() \
+    .sort_values(by=[index_name]) \
+    .astype('int') \
+    .reset_index(drop=True)
+    
+    return difi
+
+
+def observations_in_arrows(df, goodpairs, *args, **kwargs):
+    """Find which observations go into an arrow.
+    
+    Parameters:
+    -----------
+    df          ... pandas dataframe with observations
+    goodpairs   ... filtered list of pairs of observations [obsid1,obsid2] linked into arrows
+    
+    Returns:
+    --------
+    df_obs_in_arrows ... pandas dataframe where the index is the arrow id 
+                         and the first and second column are the first and second observation 
+                         that go into the respective arrow.
+    """
+    df_obs_in_arrows = pd.DataFrame(goodpairs,**kwargs)
+    return df_obs_in_arrows
+
+
+def select3obs(df, method='max_arc', return_df=True, **kwargs):
+    """Select three observations from an observation dataframe.
+    
+    Parameters:
+    -----------
+    df        ... Pandas DataFrame containing nightly RA and DEC [deg], time [JD, MJD] UTC,
+                  heliocentric ecliptic observer positions and velocities [au]
+                  
+    Keyword Arguments:
+    ------------------
+    method    ... method for selecting three observations: 
+                  'max_arc': maximise observation arc
+                  'random': uniform random sampling
+    return_df ... boolean (default True): return dataframe conainting data from three observations only
+                
+    Returns:
+    --------
+    idx    ... DataFrame Indices for selection 
+    
+    """
+     
+    if(method == 'max_arc'):
+        idx=[]
+        idx_add=idx.append
+        tmin=df['time'].min()
+        tmax=df['time'].max()
+        tcenter=(tmax+tmin)/2
+        
+        idx_add(df[(df['time']==df['time'].min())].index[0])
+        idx_add(df.iloc[(df['time']-tcenter).abs().argsort()[0:1]].index[0])
+        idx_add(df[(df['time']==df['time'].max())].index[0])
+    
+    elif(method == 'random'):
+        idx=np.random.choice(df.index,3, replace=False)
+        
+    else:
+        raise Exception("Error in select3obs: Unknown selection method. ")
+    
+    if(return_df):
+        return idx, df.loc[idx]
+    else:
+        return idx 
+    
+    
+def iodFilter(df, **kwargs):
+    """Initial orbit determination from a set of Right Ascension and Declination observations.
+    
+    Parameters:
+    -----------
+    df                ... Pandas DataFrame containing nightly RA and DEC [deg], time [JD, MJD] UTC,
+                          heliocentric ecliptic observer positions and velocities [au]
+    
+    Returns:
+    --------
+    rms               ... root mean square (RMS) of RA and DEC O-Cs [arcseconds]
+    epoch             ... epoch of best fit orbit
+    state             ... state of best fit orbit (x,y,z,vx,vy,vz) [au, au/day]
+    """
+    
+    [idx, threeobs] = select3obs(df, return_df=True, method='max_arc')
+    
+    coords_eq_ang = threeobs[['RA','DEC']].values
+    t = threeobs['time'].values
+    coords_obs = threeobs[['x_obs','y_obs','z_obs']].values
+    
+    gauss_sol = iod.gaussIOD(coords_eq_ang, t, coords_obs, 
+                           velocity_method='gibbs', light_time=True, iterate=True, 
+                           mu=cn.GM, max_iter=9, tol=1e-13)
+       
+#     if (orbital_elements):
+#         oe_sol=[]
+#         for sol in gauss_sol:
+#             oe_sol.append(tr.cartesian2cometary(sol[0], sol[1:7], mu=cnst.GM))
+    
+    rms_all = np.zeros(3)
+    i=0
+    for sol in gauss_sol:
+        [rms, dra, ddec] = ephem.radecResiduals(df, sol[0], sol[1:7], output_units='arcsec')
+        rms_all[i]=rms 
+        i=i+1   
+    
+    i_min=np.argmin(rms_all)
+    
+    # print best state with lowest RMS
+    return rms_all[i_min], gauss_sol[i_min][0], gauss_sol[i_min][1:7]

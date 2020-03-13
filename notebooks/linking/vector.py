@@ -33,7 +33,8 @@ import numpy as np
 import numba
 
 
-__all__ = ['norm', 'unitVector', 'dot2D','rotateVector']
+__all__ = ['norm', 'unitVector', 'dot2D','rotateVector',
+           'sphereLineIntercept']
 
 ############################################
 # MODULE SPECIFIC EXCEPTION
@@ -164,3 +165,42 @@ def rotateVector(angle, axis, vector, deg=True):
     uuv = u*(np.vdot(u, vector))
     vrot = uuv.T+cosa*np.cross(uxv, u).T+sina*uxv.T
     return vrot.T
+
+def sphereLineIntercept(l, o, r):
+    """Calculate intercept point between line y = l.x + o
+       and a sphere around the center of origin of the
+       coordinate system: c=0
+
+       Parameters:
+       ------------
+       l ... vector of line of sight
+       o ... observer position
+       r ... vector of distances (radii on the heliocecntric sphere)
+
+       Returns:
+       --------
+       x_intercept  ... position of intersection
+                        between the line and the sphere
+                        along the line of sight
+    """
+
+    x_intercept = np.full(np.shape(l), np.nan)
+
+    ln = unitVector(l)
+
+    for i in range(len(l[:, 0])):
+
+        lo = np.vdot(ln[i, :], o[i, :])
+
+        if (r.size == 1):
+            r2 = r*r
+        else:
+            r2 = r[i]*r[i]
+
+        discrim = lo**2 - (np.vdot(o[i, :], o[i, :]) - r2)
+        if(discrim >= 0):
+            # line and sphere do actually intersect
+            d = -lo + np.sqrt(discrim)
+            x_intercept[i, :] = o[i, :]+d*ln[i, :]
+
+    return x_intercept

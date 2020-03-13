@@ -46,32 +46,31 @@ import vector as vec
 __all__ = ['mjd2jd', 'jd2mjd', 'frameCheck', 
            'keplerian2cartesian', 'cartesian2keplerian',
            'cartesian2cometary','cometary2keplerian',
-           'cometary2cartesian', 'sphereLineIntercept',
+           'cometary2cartesian', 
            'radec2heliocentric', 'radec2icrfu',
-           'icrf2ephemeris', 'topocentric2ephemeris',
-           'state2ephemeris', 'icrf2ecliptic',
+           'icrf2ecliptic',
            'ecliptic2icrf','coordinateTransform']
 
 ############################################
 # MODULE VARIABLES FROM CONSTANTS
 ###########################################
 
-OBLRAD=np.deg2rad(cnst.EARTH_OBLIQUITY)
-COSOBS=np.cos(OBLRAD)
-SINOBL=np.sin(OBLRAD)
+OBLRAD = np.deg2rad(cnst.EARTH_OBLIQUITY)
+COSOBS = np.cos(OBLRAD)
+SINOBL = np.sin(OBLRAD)
 
 ICRF2ECL = np.array([[1., 0., 0.],
                      [0., COSOBS, SINOBL],
                      [0., -SINOBL, COSOBS]], dtype='float64')
 
 ECL2ICRF = np.array([[1., 0., 0.],
-                     [0., COSOBS, -sinobl],
+                     [0., COSOBS, -SINOBL],
                      [0., SINOBL, COSOBS]], dtype='float64')
 
 PIX2 = np.pi*2.
 
-multiply=np.multiply
-divide=np.divide
+multiply = np.multiply
+divide = np.divide
 
 ############################################
 # MODULE SPECIFIC EXCEPTION
@@ -395,47 +394,7 @@ def cometary2cartesian(epoch, com, frame='ecliptic', mu=cnst.GM):
 ############################################
 # RA DEC TRANSFORMS
 ###########################################
-                     
-def sphereLineIntercept(l, o, r):
-    """Calculate intercept point between line y = l.x + o
-       and a sphere around the center of origin of the
-       coordinate system: c=0
-
-       Parameters:
-       ------------
-       l ... vector of line of sight
-       o ... observer position
-       r ... vector of distances (radii on the heliocecntric sphere)
-
-       Returns:
-       --------
-       x_intercept  ... position of intersection
-                        between the line and the sphere
-                        along the line of sight
-    """
-
-    x_intercept = np.full(np.shape(l), np.nan)
-
-    ln = unitVector(l)
-
-    for i in range(len(l[:, 0])):
-
-        lo = np.vdot(ln[i, :], o[i, :])
-
-        if (r.size == 1):
-            r2 = r*r
-        else:
-            r2 = r[i]*r[i]
-
-        discrim = lo**2 - (np.vdot(o[i, :], o[i, :]) - r2)
-        if(discrim >= 0):
-            # line and sphere do actually intersect
-            d = -lo + np.sqrt(discrim)
-            x_intercept[i, :] = o[i, :]+d*ln[i, :]
-
-    return x_intercept
-                     
-                     
+                                         
 def radec2heliocentric(tref, epoch, ra, dec, r=1, drdt=0, deg=True, frame='ecliptic'):
     """Transform topocentric Right Ascension (RA) and Declination (DEC)
     to heliocentric coordinates.
@@ -456,8 +415,6 @@ def radec2heliocentric(tref, epoch, ra, dec, r=1, drdt=0, deg=True, frame='eclip
     pos ... heliocientric positions
 
     """
-    # speed of light in au/day
-    c_aupd = cnst.CAUPD
 
     # Transform RADEC observations into positions on the unit sphere (US)
     xyz = radec2icrfu(ra, dec, deg)
@@ -472,7 +429,7 @@ def radec2heliocentric(tref, epoch, ra, dec, r=1, drdt=0, deg=True, frame='eclip
     r_plus_dr = r+dr
 
     # Heliocentric postions of the observed asteroids
-    pos = sphereLineIntercept(los, observer, r_plus_dr)
+    pos = vec.sphereLineIntercept(los, observer, r_plus_dr)
     
     if(frame == 'ecliptic'):
         posh = ecliptic2icrf(pos)
@@ -556,220 +513,7 @@ def radec2icrfu(ra, dec, deg=True):
     return np.array([x, y, z])
 
 
-def icrf2ephemeris(epoch, state, timescale_epoch='utc', 
-                   timescale_state='tdb', time_format='mjd', deg=True, lttc=True):
-    """Transform topocentric ICRF states to
-    Right Ascension (RA) and Declination (DEC) observations.
-    
-    Parameters:
-    -----------
-    epoch             ... epoch of RADEC observation (astropy.time object)
-    state             ... topocentric state vector of object (ICRF) [au] 
-                      ... (given at epoch in TDB)
-    epoch_timescale   ... time scale for epoch ('utc', 'tdb'), default utc
-    state_timescale   ... time scale for state epoch ('utc', 'tdb'), default tdb
-    deg               ... True (default): angles in degrees, False: angles in radians
-    lttc              ... True (default): correct for light travel time \
-                          (needs entire state including velocities)
-    
-    Returns:
-    --------
-    RA               ... Right Ascension [default deg]
-    DEC              ... Declination [default deg]
-    dRA/dt*cos(DEC)  ... sky plane motion in RA [default deg/day]
-    dDEC/dt          ... sky plane motion in DEC [default deg/day]
-    r                ... distance to object [au]
-    dr/dt            ... line of sight velocity [au/day]
 
-    """
-    
-    # Correct for time shift between UTC and TDB
-    time=Time(epoch,scale=timescale_epoch, format=time_format)
-    
-    if(timescale_state != timescale_epoch):
-        dt = ((Time(time,scale=timescale_epoch,format=time_format)).value - 
-             (Time(time,scale=timescale_state,format=time_format)).value)
-    else:
-        dt = 0.
-      
-    if(state.ndim == 1):  
-        # Check if we have the full state 
-        if(len(state)!=6):
-                   raise Exception('Error in icrf2radec: Full state including velocities \
-                        needed for light travel time and timescale correcion.')           
-           
-        # Add Light travel time correction to TDB-UTC
-        if(lttc):
-            # determine state corrected for light travel time
-            r0 = np.linalg.norm(state[0:3]) 
-            dt = dt + r0/cnst.c_aupd
-        
-        state_corrected = np.hstack([state[0:3] - dt*state[3:6] 
-                                    # - dt**2*cnst.GM/r0**3*state[0:3], 
-                                     , state[3:6]])
-       
-        # Calculate Right Ascension and Declination
-        r1 = np.linalg.norm(state_corrected[0:3]) 
-        
-        rn = state_corrected[0:3]/r1 
-        rdot = np.dot(rn,state_corrected[3:6])
-        
-        RA = np.mod(np.arctan2(rn[1],rn[0])+pix2,pix2)
-        DEC = np.arcsin(rn[2])
-        
-
-        # Analytic Derivatives
-        # dalpha/dt = (x dy/dt - y dx/dt)/(x^2+y^2)
-        # ddelta/dt = (dz/dt r - z dr/dt)/(r^2 sqrt(1-z^2/r^2))
-        dRAdt = (state_corrected[0]*state_corrected[4]-
-                 state_corrected[1]*state_corrected[3]
-                 )/(state_corrected[0]**2+state_corrected[1]**2)
-        dDECdt = (state_corrected[5]*r1-state_corrected[2]*rdot)/(r1*
-                  np.sqrt(r1**2-state_corrected[3]**2))
-        
-#         print('dRAdt,dDECdt, analytics') 
-#         print([np.rad2deg(dRAdt)*np.cos(DEC),np.rad2deg(dDECdt)])
-        
-         # Finite Differences for derivatives
-#         RA_later = np.mod(np.arctan2(state[1],state[0])+pix2,pix2)
-#         DEC_later = np.arcsin(state[2]/r0)
-#         dRAdt=(RA_later-RA)/dt
-#         dDECdt=(DEC_later-DEC)/dt
-       
-#         print('dRAdt,dDECdt, finite diff')     
-#         print([np.rad2deg(dRAdt)*np.cos(DEC),np.rad2deg(dDECdt)])
-        
-    else:
-        if(state.shape[1]!=6):
-                raise Exception('Error in icrf2radec: Full state including velocities \
-                        needed for light travel time and timescale correcion.')  
-        
-         # Add Light travel time correction to TDB-UTC
-        if(lttc):
-            # determine state corrected for light travel time
-            r0 = np.linalg.norm(state[:,0:3],axis=1)
-            # print(dt)
-            # print(np.divide(r0,cnst.c_aupd))
-            dt = np.add(dt,np.divide(r0,cnst.c_aupd))
-            # print(dt)
-            
-        state_xyz = np.array([state[:,0] - multiply(dt,state[:,3]),
-                              state[:,1] - multiply(dt,state[:,4]),
-                              state[:,2] - multiply(dt,state[:,5])]).T 
-        
-        r1 = np.linalg.norm(state_xyz[:,0:3],axis=1)                     
-        rn = np.array([divide(state_xyz[:,0],r1),
-                     divide(state_xyz[:,1],r1),
-                     divide(state_xyz[:,2],r1)]).T
-        
-        
-        #rdot = np.tensordot(rn[:,0:3],state[:,3:6],axes=1)
-        rdot = vec.dot2D(rn,state,
-                          np.array([0,1,2],dtype='Int32'),np.array([3,4,5],dtype='Int32'))
-        
-        RA = np.mod(np.arctan2(rn[:,1],rn[:,0])+pix2,pix2)
-        DEC = np.arcsin(rn[:,2])
-        
-        dRAdt = divide((state_xyz[:,0]*state[:,4]-state_xyz[:,1]*state[:,3]),
-                        state_xyz[:,0]**2+state_xyz[:,1]**2)
-        #dDECdt=divide(divide(state[:,5]),rdot)
-        dDECdt = divide(multiply(state[:,5],r1)-multiply(state_xyz[:,2],rdot),
-                        multiply(r1,np.sqrt(r1**2 - state[:,5]**2)))
-        
-    if(deg):
-#         print('RA, DEC')
-#         print(np.rad2deg(RA))
-#         print(np.rad2deg(DEC))
-#         print('dRAdt,dDecdt')
-#         print(np.rad2deg(multiply(dRAdt,np.cos(DEC))))
-#         print(np.rad2deg(dDECdt))
-#         print('r, rdot')
-#         print(r1)
-#         print(rdot)
-        
-        radecr = np.array([np.rad2deg(RA), np.rad2deg(DEC),
-                           np.rad2deg(multiply(dRAdt,np.cos(DEC))),np.rad2deg(dDECdt),
-                           r1, rdot]).T
-    else:
-        radecr = np.array([RA, DEC,  multiply(dRAdt,np.cos(DEC)), dDECdt, r1, rdot]).T
-    
-    return radecr
-
-def topocentric2ephemeris(epoch, state, frame='icrf', **kwargs):
-    """Transform topocentric ICRF states to
-    Right Ascension (RA) and Declination (DEC) observations.
-    
-    Parameters:
-    -----------
-    epoch             ... epoch of RADEC observation (astropy.time object)
-    state             ... topocentric state vector of object [au] 
-    frame             ... reference frame ('icrf' or 'ecliptic')
-                      ... (given at epoch in TDB)
-    Kwargs:
-    -------
-    epoch_timescale   ... time scale for epoch ('utc', 'tdb'), default 'utc'
-    state_timescale   ... time scale for state epoch ('utc', 'tdb'), default 'tdb'
-    deg               ... True (default): angles in degrees, False: angles in radians
-    lttc              ... True (default): correct for light travel time (needs full state including velocities)
-    
-    Returns:
-    --------
-    RA               ... Right Ascension [default deg]
-    DEC              ... Declination [default deg]
-    dRA/dt*cos(DEC)  ... sky plane motion in RA [default deg/day]
-    dDEC/dt          ... sky plane motion in DEC [default deg/day]
-    r                ... distance to object [au]
-    dr/dt            ... line of sight velocity [au/day]
-    """
-
-    if (frame == 'ecliptic'):    
-        state_icrf = ecliptic2icrf(state)
-        ephemeris = icrf2ephemeris(epoch, state_icrf, **kwargs)
-        
-    elif(frame == 'icrf'):
-        ephemeris = icrf2ephemeris(epoch, state, **kwargs)
-         
-    else:
-        raise Exception('Error in coordinate_transform: \
-                         3D positions or 6D state vector required') 
-        
-    return ephemeris   
-
-
-def state2ephemeris(epoch, state_asteroid, state_observer, **kwargs):
-    """Transform topocentric ICRF states to
-    Right Ascension (RA) and Declination (DEC) observations.
-    
-    Parameters:
-    -----------
-    epoch             ... epoch of RADEC observation (astropy.time object)
-    state_asteroid    ... state vector of asteroid [au, au/day] 
-    state_observer    ... state vector of observer [au, au/day]    
-    
-    Kwargs:
-    -------
-    frame             ... reference frame for both states ('icrf' or 'ecliptic'), default 'icrf'
-    epoch_timescale   ... time scale for epoch ('utc', 'tdb'), default 'utc'
-    state_timescale   ... time scale for state epoch ('utc', 'tdb'), default 'tdb'
-    deg               ... True: angles in degrees, False: angles in radians
-    lttc              ... True: correct for light travel time (needs full state including velocities)
-    
-    Returns:
-    --------
-    RA               ... Right Ascension [default deg]
-    DEC              ... Declination [default deg]
-    dRA/dt*cos(DEC)  ... sky plane motion in RA [default deg/day]
-    dDEC/dt          ... sky plane motion in DEC [default deg/day]
-    r                ... distance to object [au]
-    dr/dt            ... line of sight velocity [au/day]
-    """
-
-    # observer to asteroid vectors
-    topocentric_state = state_asteroid - state_observer
-    # calculate ephemeris
-    ephemeris = topocentric2ephemeris(epoch, topocentric_state, **kwargs)
-        
-    return ephemeris 
         
 # def radec2eclip(ra, dec, deg=True):
 #     """Convert Right Ascension and Declination to ecliptic xyz unit vector
@@ -825,7 +569,7 @@ def icrf2ecliptic(x_icrf):
     """ 
                       
     # tranfromation matrix ecliptic to ICRF coordinate system
-    M = icrf2ecl
+    M = ICRF2ECL
     x_ecl = coordinateTransform(M, x_icrf)                     
     return x_ecl
 
@@ -847,7 +591,7 @@ def ecliptic2icrf(x_ecl):
     coordinate_transform
     """
     # tranfromation matrix ecliptic to ICRF coordinate system
-    M = ecl2icrf                   
+    M = ECL2ICRF                   
     x_icrf = coordinateTransform(M, x_ecl)
     return x_icrf
 
